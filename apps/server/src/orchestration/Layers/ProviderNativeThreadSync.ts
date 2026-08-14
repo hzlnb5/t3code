@@ -19,7 +19,11 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
-import { canonicalizeProviderPath, providerPathsEqual, providerProjectName } from "../../provider/CodexSyncPath.ts";
+import {
+  canonicalizeProviderPath,
+  providerPathsEqual,
+  providerProjectName,
+} from "../../provider/CodexSyncPath.ts";
 import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import type {
   ProviderNativeThreadDetail,
@@ -44,7 +48,11 @@ function nativeThreadKey(instanceId: ProviderInstanceId, providerThreadId: strin
 }
 
 function bindingProviderThreadId(binding: ProviderRuntimeBindingWithMetadata): string | undefined {
-  if (!binding.resumeCursor || typeof binding.resumeCursor !== "object" || Array.isArray(binding.resumeCursor)) {
+  if (
+    !binding.resumeCursor ||
+    typeof binding.resumeCursor !== "object" ||
+    Array.isArray(binding.resumeCursor)
+  ) {
     return undefined;
   }
   const threadId = "threadId" in binding.resumeCursor ? binding.resumeCursor.threadId : undefined;
@@ -230,21 +238,28 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
       existingMessageIds.add(importedMessageId);
     }
 
-    yield* directory.upsert({
-      threadId,
-      provider: input.driverKind,
-      providerInstanceId: input.instanceId,
-      status: "stopped",
-      resumeCursor: { threadId: input.detail.providerThreadId },
-      runtimeMode: DEFAULT_RUNTIME_MODE,
-      runtimePayload: {
-        cwd: canonicalPath.path,
-        model: input.modelSelection.model,
-        activeTurnId: null,
-        lastError: null,
-        modelSelection: input.modelSelection,
-      },
-    });
+    // Existing T3-created threads already own a runtime binding. Never mutate
+    // its status/runtime payload from the background importer: doing so could
+    // turn an actively-running T3 session into "stopped" while Codex is still
+    // producing events. Only native threads discovered for the first time get
+    // a new binding that points at the provider's durable thread id.
+    if (boundThreadId === undefined) {
+      yield* directory.upsert({
+        threadId,
+        provider: input.driverKind,
+        providerInstanceId: input.instanceId,
+        status: "stopped",
+        resumeCursor: { threadId: input.detail.providerThreadId },
+        runtimeMode: DEFAULT_RUNTIME_MODE,
+        runtimePayload: {
+          cwd: canonicalPath.path,
+          model: input.modelSelection.model,
+          activeTurnId: null,
+          lastError: null,
+          modelSelection: input.modelSelection,
+        },
+      });
+    }
   });
 
   const syncInstance = Effect.fn("ProviderNativeThreadSync.syncInstance")(function* (
