@@ -16,7 +16,9 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
+import type {
+  OrchestrationEventStoreError,
+} from "../../persistence/Errors.ts";
 
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
@@ -24,13 +26,6 @@ import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
 export interface OrchestrationEngineShape {
   /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
-   *
-   * @param fromSequenceExclusive - Sequence cursor (exclusive).
-   * @param limit - Maximum number of events to read. Defaults to the event
-   *   store's page-bounded default; pass a higher value when the caller must
-   *   read every event after the cursor (e.g. per-thread catch-up that filters
-   *   a small subset out of a potentially larger global range).
-   * @returns Stream containing ordered events.
    */
   readonly readEvents: (
     fromSequenceExclusive: number,
@@ -38,55 +33,35 @@ export interface OrchestrationEngineShape {
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError, never>;
 
   /**
-   * Dispatch a validated orchestration command.
-   *
-   * @param command - Valid orchestration command.
-   * @returns Effect containing the sequence of the persisted event.
-   *
-   * Dispatch is serialized through an internal queue and deduplicated via
-   * command receipts.
+   * Dispatch a validated orchestration command. Dispatch is serialized through
+   * the engine queue and deduplicated via command receipts.
    */
   readonly dispatch: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**
-   * Admit an event that was persisted and projected by a server-side importer.
-   * The importer owns durable append/projection; the engine folds the event
-   * into its authoritative command read-model and publishes it to live WS
-   * subscribers. This keeps provider-native history sync on the same event
-   * stream without exposing an import command on the client wire protocol.
+   * Append a server-originated event through the same serialization queue as
+   * normal commands. This is intentionally not part of the client command
+   * schema: provider-native history import can persist/project/publish an
+   * existing domain event without inventing a client-visible command or
+   * triggering provider command reactors.
    */
-  readonly admitPersistedEvent: (
-    event: OrchestrationEvent,
-  ) => Effect.Effect<void, OrchestrationDispatchError, never>;
+  readonly appendImportedEvent: (
+    event: Omit<OrchestrationEvent, "sequence">,
+  ) => Effect.Effect<
+    OrchestrationEvent,
+    OrchestrationDispatchError | OrchestrationEventStoreError,
+    never
+  >;
 
-  /**
-   * Stream persisted domain events in dispatch order.
-   *
-   * This is a hot runtime stream (new events only), not a historical replay.
-   */
+  /** Hot runtime stream (new events only), not a historical replay. */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
 
-  /**
-   * The latest sequence reflected in the engine's authoritative command read
-   * model (0 if none). Used to gauge how far behind a resuming client is before
-   * choosing between an incremental replay and a fresh projected snapshot.
-   */
+  /** Latest sequence reflected in the engine's authoritative command model. */
   readonly latestSequence: Effect.Effect<number, never, never>;
 }
 
-/**
- * OrchestrationEngineService - Service tag for orchestration engine access.
- *
- * @example
- * ```ts
- * const program = Effect.gen(function* () {
- *   const engine = yield* OrchestrationEngineService
- *   return yield* engine.dispatch(command)
- * })
- * ```
- */
 export class OrchestrationEngineService extends Context.Service<
   OrchestrationEngineService,
   OrchestrationEngineShape
