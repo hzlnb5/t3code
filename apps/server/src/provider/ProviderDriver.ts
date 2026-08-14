@@ -32,6 +32,7 @@ import type * as Scope from "effect/Scope";
 
 import type * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import type { ProviderAdapterError, ProviderDriverError } from "./Errors.ts";
+import type { ProviderNativeThreadCatalog } from "./ProviderNativeThreadCatalog.ts";
 import type { ProviderAdapterShape } from "./Services/ProviderAdapter.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
 
@@ -70,6 +71,13 @@ export interface ProviderInstance {
   readonly enabled: boolean;
   readonly snapshot: ServerProviderShape;
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+  /**
+   * Optional provider-native thread discovery/read surface. Providers that
+   * expose a durable conversation catalog (Codex app-server, for example)
+   * attach it here so orchestration can import and resume native threads
+   * without knowing provider-specific RPC details.
+   */
+  readonly nativeThreadCatalog?: ProviderNativeThreadCatalog | undefined;
   readonly textGeneration: TextGeneration.TextGeneration["Service"];
 }
 
