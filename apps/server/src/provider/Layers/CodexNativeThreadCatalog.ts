@@ -3,10 +3,9 @@ import type { CodexSettings } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Scope from "effect/Scope";
-import { ChildProcess, type ChildProcessSpawner } from "effect/unstable/process";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as CodexClient from "effect-codex-app-server/client";
-import * as CodexErrors from "effect-codex-app-server/errors";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -66,13 +65,8 @@ function readUserMessageText(item: Record<string, unknown>): string | undefined 
 }
 
 function readAgentMessageText(item: Record<string, unknown>): string | undefined {
-  for (const key of ["text", "message", "content"] as const) {
-    const value = item[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return value.trim();
-    }
-  }
-  return undefined;
+  const text = item.text;
+  return typeof text === "string" && text.trim().length > 0 ? text.trim() : undefined;
 }
 
 function messagesFromThread(
@@ -94,10 +88,8 @@ function messagesFromThread(
         text = readAgentMessageText(item);
       }
       if (!role || !text) continue;
-      // Codex thread snapshots do not expose per-item timestamps. Preserve a
-      // deterministic chronological order by spacing imported messages from
-      // the thread creation time; subsequent sync passes therefore produce
-      // exactly the same timestamps and ids.
+      // Thread snapshots do not expose per-item timestamps. Use a stable,
+      // monotonic timestamp so repeated imports preserve order and identity.
       const createdAt = new Date(thread.createdAt * 1_000 + messageIndex).toISOString();
       messages.push({
         providerMessageId: itemId,
