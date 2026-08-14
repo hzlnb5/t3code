@@ -51,6 +51,17 @@ export interface OrchestrationEngineShape {
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**
+   * Admit an event that was persisted and projected by a server-side importer.
+   * The importer owns durable append/projection; the engine folds the event
+   * into its authoritative command read-model and publishes it to live WS
+   * subscribers. This keeps provider-native history sync on the same event
+   * stream without exposing an import command on the client wire protocol.
+   */
+  readonly admitPersistedEvent: (
+    event: OrchestrationEvent,
+  ) => Effect.Effect<void, OrchestrationDispatchError, never>;
+
+  /**
    * Stream persisted domain events in dispatch order.
    *
    * This is a hot runtime stream (new events only), not a historical replay.
