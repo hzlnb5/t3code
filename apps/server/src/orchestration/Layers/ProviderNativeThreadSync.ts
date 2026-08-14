@@ -12,6 +12,7 @@ import {
   TurnId,
   type ModelSelection,
   type OrchestrationEvent,
+  type ProviderDriverKind,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -19,10 +20,10 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import { canonicalizeProviderPath, providerPathsEqual, providerProjectName } from "../../provider/CodexSyncPath.ts";
+import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import type {
   ProviderNativeThreadDetail,
   ProviderNativeThreadMessage,
-  ProviderNativeThreadSummary,
 } from "../../provider/ProviderNativeThreadCatalog.ts";
 import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
 import {
@@ -155,7 +156,7 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
 
   const syncDetail = Effect.fn("ProviderNativeThreadSync.syncDetail")(function* (input: {
     readonly instanceId: ProviderInstanceId;
-    readonly driverKind: string;
+    readonly driverKind: ProviderDriverKind;
     readonly modelSelection: ModelSelection;
     readonly detail: ProviderNativeThreadDetail;
     readonly bindings: ReadonlyArray<ProviderRuntimeBindingWithMetadata>;
@@ -166,11 +167,11 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
     }
 
     const shell = yield* projections.getShellSnapshot();
-    let project = shell.projects.find((candidate) =>
+    const existingProject = shell.projects.find((candidate) =>
       providerPathsEqual(candidate.workspaceRoot, canonicalPath.path),
     );
-    if (!project) {
-      const projectId = projectIdForPath(canonicalPath.key);
+    const projectId = existingProject?.id ?? projectIdForPath(canonicalPath.key);
+    if (!existingProject) {
       yield* engine.dispatch({
         type: "project.create",
         commandId: commandId("project", canonicalPath.key),
@@ -180,17 +181,6 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
         defaultModelSelection: input.modelSelection,
         createdAt: input.detail.createdAt,
       });
-      project = {
-        id: projectId,
-        title: providerProjectName(canonicalPath),
-        workspaceRoot: canonicalPath.path,
-        repositoryIdentity: null,
-        defaultModelSelection: input.modelSelection,
-        faviconPath: null,
-        scripts: [],
-        createdAt: input.detail.createdAt,
-        updatedAt: input.detail.createdAt,
-      };
     }
 
     const boundThreadId = findBoundThread(
@@ -209,7 +199,7 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
           `${input.instanceId}:${input.detail.providerThreadId}`,
         ),
         threadId,
-        projectId: project.id,
+        projectId,
         title: input.detail.title,
         modelSelection: input.modelSelection,
         runtimeMode: DEFAULT_RUNTIME_MODE,
@@ -242,7 +232,7 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
 
     yield* directory.upsert({
       threadId,
-      provider: input.driverKind as never,
+      provider: input.driverKind,
       providerInstanceId: input.instanceId,
       status: "stopped",
       resumeCursor: { threadId: input.detail.providerThreadId },
@@ -258,7 +248,7 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
   });
 
   const syncInstance = Effect.fn("ProviderNativeThreadSync.syncInstance")(function* (
-    instance: (typeof registry.listInstances extends Effect.Effect<infer A> ? A : never)[number],
+    instance: ProviderInstance,
   ) {
     const catalog = instance.nativeThreadCatalog;
     if (!instance.enabled || !catalog) return;
@@ -281,7 +271,7 @@ export const makeProviderNativeThreadSync = Effect.gen(function* () {
       const detail = yield* catalog.readThread(summary.providerThreadId);
       yield* syncDetail({
         instanceId: instance.instanceId,
-        driverKind: String(instance.driverKind),
+        driverKind: instance.driverKind,
         modelSelection,
         detail,
         bindings,
