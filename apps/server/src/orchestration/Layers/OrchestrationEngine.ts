@@ -28,7 +28,10 @@ import {
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
-import { toPersistenceSqlError } from "../../persistence/Errors.ts";
+import {
+  toPersistenceSqlError,
+  type OrchestrationEventStoreError,
+} from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
@@ -50,11 +53,22 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
 );
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
 
+type ImportedEventError = OrchestrationDispatchError | OrchestrationEventStoreError;
+
 interface CommandEnvelope {
-  command: OrchestrationCommand;
-  result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
-  startedAtMs: number;
+  readonly kind: "command";
+  readonly command: OrchestrationCommand;
+  readonly result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
+  readonly startedAtMs: number;
 }
+
+interface ImportedEventEnvelope {
+  readonly kind: "imported-event";
+  readonly event: Omit<OrchestrationEvent, "sequence">;
+  readonly result: Deferred.Deferred<OrchestrationEvent, ImportedEventError>;
+}
+
+type EngineEnvelope = CommandEnvelope | ImportedEventEnvelope;
 
 function commandToAggregateRef(command: OrchestrationCommand): {
   readonly aggregateKind: "project" | "thread";
@@ -87,7 +101,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
 
-  const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
+  const engineQueue = yield* Queue.unbounded<EngineEnvelope>();
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
 
   const projectEventsOntoReadModel = (
@@ -102,7 +116,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return nextReadModel;
     });
 
-  const processEnvelope = (envelope: CommandEnvelope): Effect.Effect<void> => {
+  const processCommandEnvelope = (envelope: CommandEnvelope): Effect.Effect<void> => {
     const dispatchStartSequence = commandReadModel.snapshotSequence;
     let processingStartedAtMs = 0;
     const aggregateRef = commandToAggregateRef(envelope.command);
@@ -297,10 +311,52 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
+  const processImportedEventEnvelope = (
+    envelope: ImportedEventEnvelope,
+  ): Effect.Effect<void> =>
+    Effect.exit(
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const savedEvent = yield* eventStore.append(envelope.event);
+            const nextCommandReadModel = yield* projectEvent(commandReadModel, savedEvent);
+            yield* projectionPipeline.projectEvent(savedEvent);
+            return { savedEvent, nextCommandReadModel } as const;
+          }),
+        )
+        .pipe(
+          Effect.catchTag("SqlError", (sqlError) =>
+            Effect.fail(
+              toPersistenceSqlError("OrchestrationEngine.importedEvent:transaction")(sqlError),
+            ),
+          ),
+        ),
+    ).pipe(
+      Effect.flatMap((exit) =>
+        Effect.gen(function* () {
+          if (Exit.isFailure(exit)) {
+            yield* Deferred.fail(envelope.result, Cause.squash(exit.cause) as ImportedEventError);
+            return;
+          }
+          commandReadModel = exit.value.nextCommandReadModel;
+          yield* PubSub.publish(eventPubSub, exit.value.savedEvent);
+          yield* Deferred.succeed(envelope.result, exit.value.savedEvent);
+        }),
+      ),
+    );
+
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  const worker = Effect.forever(
+    Queue.take(engineQueue).pipe(
+      Effect.flatMap((envelope) =>
+        envelope.kind === "command"
+          ? processCommandEnvelope(envelope)
+          : processImportedEventEnvelope(envelope),
+      ),
+    ),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
@@ -312,7 +368,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
-      yield* Queue.offer(commandQueue, {
+      yield* Queue.offer(engineQueue, {
+        kind: "command",
         command,
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
@@ -320,9 +377,21 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return yield* Deferred.await(result);
     });
 
+  const appendImportedEvent: OrchestrationEngineShape["appendImportedEvent"] = (event) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<OrchestrationEvent, ImportedEventError>();
+      yield* Queue.offer(engineQueue, {
+        kind: "imported-event",
+        event,
+        result,
+      });
+      return yield* Deferred.await(result);
+    });
+
   return {
     readEvents,
     dispatch,
+    appendImportedEvent,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.
